@@ -229,23 +229,27 @@ class TrajectoryOptimizationSolution:
                           np.zeros(self.n_x,), 
                           vars)
 
-  def ContactConstraintEvaluator(self, x_i, mode):
+  def ContactConstraintEvaluator(self, x_i, u_i, lambda_c, mode):
     # Contact Contraints, accelaration = 0, velcoity = 0
     h_i = np.zeros(6, dtype=object)
     J_c, J_c_dot_v = self.CalculateContactJacobian(x_i, mode)
     
-    vdot = x_i[self.n_q:]
-    h_i[:3] = J_c @ vdot + J_c_dot_v
-    h_i[3:] = J_c @ x_i[self.n_q:]
+    xdot = self.EvaluateDynamics(x_i, u_i, J_c, lambda_c)
+    v = xdot[:self.n_q]
+    vdot = xdot[self.n_q:]
+    h_i[:3] = J_c @ v
+    h_i[3:] = J_c @ vdot + J_c_dot_v
     return h_i
 
-  def AddContactConstraints(self, prog, x, N, mode):
+  def AddContactConstraints(self, prog, x, u, lambda_c, N, mode):
     for i in range(N):
         def AddContactConstraintsHelper(vars):
             x_i = vars[:self.n_x]
-            return self.ContactConstraintEvaluator(x_i, mode)
+            u_i = vars[self.n_x:self.n_x + self.n_u]
+            lambda_c = vars[self.n_x + self.n_u:]
+            return self.ContactConstraintEvaluator(x_i, u_i, lambda_c, mode)
 
-        vars = np.hstack(x[i])
+        vars = np.hstack((x[i], u[i], lambda_c[i]))
         prog.AddConstraint(AddContactConstraintsHelper, 
                         np.zeros(6,), 
                         np.zeros(6,), 
@@ -361,7 +365,7 @@ class TrajectoryOptimizationSolution:
                                     np.concatenate([x, u], -1).reshape(-1, 1)
                                     )
 
-  def AddFrictonCone(self, prog, x, u, N, n_mode, repeat, lambda_c, bar_lambda_c):
+  def AddFrictonCone(self, prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c):
     # Friction Constraints for 2D
     zero_lm = np.zeros((n_mode * N * repeat, 1))
     zero_bar = np.zeros((n_mode * (N-1) * repeat, 1))
@@ -371,7 +375,6 @@ class TrajectoryOptimizationSolution:
     prog.AddLinearEqualityConstraint(bar_lambda_c[..., 1].reshape(-1, 1), zero_bar)
 
     # Add Friction Cone Constraint assuming mu = 1
-    mu = 1
     print(f"mu = {mu}")
     
     lambda_c = lambda_c.reshape(-1, 3)
@@ -384,7 +387,7 @@ class TrajectoryOptimizationSolution:
         prog.AddLinearConstraint(-bar_lambda_c[i, 0] - mu * bar_lambda_c[i, 2] <= 0)
 
 
-  def solve(self, N, seqs, repeat, initial_states, tf, destination, iters):
+  def solve(self, N, seqs, repeat, initial_states, tf, mu, destination, iters, test=False):
     '''
     Parameters:
       N - number of knot points
@@ -432,32 +435,35 @@ class TrajectoryOptimizationSolution:
     ub = angle * np.ones((n_mode * N * repeat, 1))
     prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, joint_pos_idx].reshape(-1, 1))
 
+
+
+
+
+    x0 = x[0, 0]
     ## Add constraints on the initial state
+    if test:
+      print("Testing Mode, Keep the biped standing. Swing left legs backwards")
+      initial = np.array(
+              [0.00000000,0.80000000,0.00000000,
+              -0.64350111,1.28700222,-0.64350111,1.28700222,
+              0.00000000,0.00000000,0.00000000,0.00000000,
+              0.00000000,0.00000000,0.00000000])
 
-    initial = np.array(
-            [0.00000000,0.80000000,0.00000000,
-            -0.64350111,1.28700222,-0.64350111,1.28700222,
-            0.00000000,0.00000000,0.00000000,0.00000000,
-            0.00000000,0.00000000,0.00000000])
+      final = np.array(
+              [0.00000000,0.80000000,0.00000000,
+              +0.64350111, -1.28700222, -0.64350111,1.28700222,
+              0.00000000,0.00000000,0.00000000,0.00000000,
+              0.00000000,0.00000000,0.00000000])
 
-    final = np.array(
-            [0.00000000,0.80000000,0.00000000,
-            +0.64350111, -1.28700222, -0.64350111,1.28700222,
-            0.00000000,0.00000000,0.00000000,0.00000000,
-            0.00000000,0.00000000,0.00000000])
+      xf = x[-1,-1]
+      prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial)
+      prog.AddLinearEqualityConstraint(xf.reshape(-1, 1), final)
 
-    x0 = x[0,0]
-    xf = x[-1,-1]
-    #prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial_state)
-    prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial)
-    prog.AddLinearEqualityConstraint(xf.reshape(-1, 1), final)
-
-
-
-    ## Add Constraints on destination, x = 2 m
-    print(f'Destination: {destination}m')
-    #print('Dest as constraints')
-    #prog.AddLinearEqualityConstraint(x[-1][-1][0] == destination)
+    else:
+      ## Add Constraints on destination, x = 2 m
+      print(f'Destination: {destination}m')
+      prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial_state)
+      prog.AddLinearEqualityConstraint(x[-1][-1][0] == destination)
 
     # 2. Add collocation dynamics constraints
     for m, fsm in enumerate(seqs * repeat):
@@ -479,13 +485,14 @@ class TrajectoryOptimizationSolution:
             self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0.03 , ub=np.ones(2)*np.inf)
       elif mode in [LEFT_STANCE, RIGHT_STANCE]:
         # Velocity and acceleration be 0
-        self.AddContactConstraints(prog, x[m], N, mode)
+        self.AddContactConstraints(prog, x[m], u[m], lambda_c[m], N, mode)
+        # Final state is not necessarily 0
         for i in range(N-1):
           # Contact position be 0
           self.AddContactFootHeightConstraint(prog, x=x[m, i], fsm=mode, lb=[0], ub=[0])
           # Swing foot position above 0
           #if i < N-1:
-          #  self.AddSwingFootHeightConstraint(prog, x=x[m, i], fsm=mode, lb=[0], ub=[np.inf])
+          self.AddSwingFootHeightConstraint(prog, x=x[m, i], fsm=mode, lb=[0], ub=[np.inf])
           #else:
             #self.AddSwingFootHeightConstraint(prog, x=x[m, i], fsm=mode, lb=[0], ub=[0])
       elif mode == DOUBLE_SUPPORT:
@@ -493,16 +500,17 @@ class TrajectoryOptimizationSolution:
         self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.zeros(2), ub=np.ones(2)*np.inf)
 
     # 4. Reset map and guard function
-    #self.AddSwitchConstraints(prog, x, lambda_c, n_mode, N, seqs, repeat)
+    self.AddSwitchConstraints(prog, x, lambda_c, n_mode, N, seqs, repeat)
 
     # 5. Friction Cone
-    self.AddFrictonCone(prog, x, u, N, n_mode, repeat, lambda_c, bar_lambda_c)
+    self.AddFrictonCone(prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c)
 
     # 6. Add input sauration
-    #self.AddInputSauration(prog, x, u, N, n_mode, repeat)
+    self.AddInputSauration(prog, x, u, N, n_mode, repeat)
 
     # 7. Add the cost function here
-    #self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
+    if not test:
+      self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
 
 
     
