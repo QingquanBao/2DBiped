@@ -259,7 +259,8 @@ class TrajectoryOptimizationSolution:
     # TODO: Do Not Support Double Support Case Now
     ### q should be the same 
     diffq = xminus[:self.n_q] - xplus[:self.n_q]
-    prog.AddLinearEqualityConstraint(diffq, np.zeros((self.n_q,)))
+    #prog.AddLinearEqualityConstraint(diffq, np.zeros((self.n_q,)))
+    prog.AddBoundingBoxConstraint(np.zeros((self.n_q,)), np.zeros((self.n_q,)), diffq)
 
     ### vp = vm + M^{-1}*J^T*Lambda
     def impulseHelper(vars):
@@ -268,7 +269,8 @@ class TrajectoryOptimizationSolution:
         lambda_c = vars[2 * self.n_x: ]
         self.planar_arm.SetPositionsAndVelocities(self.context, xminus.reshape(-1, 1))
         M = self.planar_arm.CalcMassMatrixViaInverseDynamics(self.context)
-        J, _ = self.CalculateContactJacobian(xplus, fsm2)
+        #J, _ = self.CalculateContactJacobian(xplus, fsm2)
+        J, _ = self.CalculateContactJacobian(xminus, fsm2)
         
         diffv = M @ (xplus[self.n_q:] - xminus[self.n_q:]) - J.T @ lambda_c
         return diffv
@@ -317,17 +319,20 @@ class TrajectoryOptimizationSolution:
   ##########################################
 
   def AddSwitchConstraints(self, prog, x, lambda_c, n_mode, N, seqs, repeat):
-    for m, mode in enumerate(seqs * repeat):
+    seqs = seqs * repeat
+    for m, mode in enumerate(seqs):
       if m < n_mode * repeat - 1:
+        fsm2 = seqs[m + 1]
         if mode in [LEFT_STANCE, RIGHT_STANCE]:
           ## Reset Constraint
           xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, N-1], fsm2=mode)
+          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, -1], fsm2=mode)
+          #self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, -1], fsm2=fsm2)
           
         elif mode == DOUBLE_SUPPORT:
           ## Reset Constraint
           xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, N-1], fsm2=mode)
+          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, N-1], fsm2=fsm2)
 
         elif mode == SPACE_STANCE:
           continue
@@ -347,7 +352,7 @@ class TrajectoryOptimizationSolution:
     A = np.eye(n_mode * repeat * N)
     b = -1 * np.ones((n_mode * repeat * N)) *  destination
     print("Testing destination cost")
-    #prog.AddL2NormCost(A, b, x_flat)
+    prog.AddL2NormCost(A, b, x_flat)
 
   def AddInputSauration(self, prog, x, u, N, n_mode, repeat):
     # 6. Add bounding box constraints on the inputs and qdot 
@@ -435,8 +440,10 @@ class TrajectoryOptimizationSolution:
     ub = angle * np.ones((n_mode * N * repeat, 1))
     prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, joint_pos_idx].reshape(-1, 1))
 
-
-
+    ## y position between 0.5 to 0.9
+    lb = 0.6 * np.ones((n_mode * N * repeat, 1))
+    ub = 0.9 * np.ones((n_mode * N * repeat, 1))
+    prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, 1].reshape(-1, 1))
 
 
     x0 = x[0, 0]
@@ -467,7 +474,6 @@ class TrajectoryOptimizationSolution:
 
     # 2. Add collocation dynamics constraints
     for m, fsm in enumerate(seqs * repeat):
-    # Add the collocation aka dynamics constraints
       self.AddCollocationConstraints(prog, N, 
                                      x[m], u[m], 
                                      lambda_c[m], gamma[m], bar_lambda_c[m],
@@ -487,7 +493,7 @@ class TrajectoryOptimizationSolution:
         # Velocity and acceleration be 0
         self.AddContactConstraints(prog, x[m], u[m], lambda_c[m], N, mode)
         # Final state is not necessarily 0
-        for i in range(N-1):
+        for i in range(N):
           # Contact position be 0
           self.AddContactFootHeightConstraint(prog, x=x[m, i], fsm=mode, lb=[0], ub=[0])
           # Swing foot position above 0
@@ -513,7 +519,6 @@ class TrajectoryOptimizationSolution:
       self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
 
 
-    
     # Intial guess
 
     #prog.SetInitialGuess(x.flatten(), initial_states.flatten())
@@ -541,11 +546,31 @@ class TrajectoryOptimizationSolution:
     ## Get the solution
     x_sol = result.GetSolution(x.reshape(-1, self.n_x)).reshape(n_mode * repeat, -1, self.n_x)
     u_sol = result.GetSolution(u.reshape(-1, self.n_u)).reshape(n_mode * repeat, -1, self.n_u)
+
     lambda_sol = result.GetSolution(lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
+    lambda_bar_sol = result.GetSolution(bar_lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
+
+
+    print("Check whether the friction cone constraint holds?")
+    for m, mode in enumerate(seqs * repeat):
+      for i in range(N):
+        lambda_c_i = lambda_sol[m, i]
+        if not(lambda_c_i[0] - mu * lambda_c_i[2] <= 0 and -lambda_c_i[0] - mu * lambda_c_i[2] <= 0):
+          print("Friction Cone Constraint Not Hold")
+          print(f"lambda_c_m{m}_{i}: {lambda_c_i}")
+        
+        if i != N-1:
+          lambda_bar_i = lambda_bar_sol[m, i]
+          if not(lambda_bar_i[0] - mu * lambda_bar_i[2] <= 0 and -lambda_bar_i[0] - mu * lambda_bar_i[2] <= 0):
+            print("Friction Cone Constraint Not Hold")
+            print(f"lambda_bar_m{m}_{i}: {lambda_bar_i}")
+
 
     print('optimal cost: ', result.get_optimal_cost())
     print('x_sol: ', x_sol)
     print('u_sol: ', u_sol)
+    print('lambda_sol: ', lambda_sol)
+    print('lambda_bar_sol: ', lambda_bar_sol)
 
     print(result.get_solution_result())
 
