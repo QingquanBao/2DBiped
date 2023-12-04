@@ -45,12 +45,10 @@ class TrajectoryOptimizationSolution:
     self.contact_points = {
         LEFT_STANCE: PointOnFrame(
             self.planar_arm.GetBodyByName("left_lower_leg").body_frame(),
-            #np.array([AutoDiffXd(0), AutoDiffXd(0), AutoDiffXd(-0.5)])
             np.array([0, 0, -0.5])
         ),
         RIGHT_STANCE: PointOnFrame(
             self.planar_arm.GetBodyByName("right_lower_leg").body_frame(),
-            #np.array([AutoDiffXd(0), AutoDiffXd(0), AutoDiffXd(-0.5)])
             np.array([0, 0, -0.5])
         ),
       }
@@ -58,12 +56,10 @@ class TrajectoryOptimizationSolution:
     self.contact_points_nodiff = {
         LEFT_STANCE: PointOnFrame(
             self.plant.GetBodyByName("left_lower_leg").body_frame(),
-            #np.array([AutoDiffXd(0), AutoDiffXd(0), AutoDiffXd(-0.5)])
             np.array([0, 0, -0.5])
         ),
         RIGHT_STANCE: PointOnFrame(
             self.plant.GetBodyByName("right_lower_leg").body_frame(),
-            #np.array([AutoDiffXd(0), AutoDiffXd(0), AutoDiffXd(-0.5)])
             np.array([0, 0, -0.5])
         ),
     }
@@ -155,13 +151,14 @@ class TrajectoryOptimizationSolution:
     
     plant.SetPositionsAndVelocities(context, x.reshape(-1, 1))
 
-    M = plant.CalcMassMatrixViaInverseDynamics(context)
+    #M = plant.CalcMassMatrixViaInverseDynamics(context)
+    M = plant.CalcMassMatrix(context)
     B = plant.MakeActuationMatrix()
     G = -plant.CalcGravityGeneralizedForces(context)
     Cv = plant.CalcBiasTerm(context)
 
     M_inv = np.zeros((self.n_v, self.n_v)) 
-    if(M.dtype == AutoDiffXd):
+    if(x.dtype == AutoDiffXd) or (M.dtype == AutoDiffXd):
       M_inv = pydrake.math.inv(M)
     else:
       M_inv = np.linalg.pinv(M)
@@ -193,9 +190,9 @@ class TrajectoryOptimizationSolution:
     dynam = self.EvaluateDynamics(s_i, 0.5 * (u_i + u_ip1), J_col, bar_lambda)
 
     # J(q_c) 
-    J, _ = self.CalculateContactJacobian(s_i, fsm)
+    #J, _ = self.CalculateContactJacobian(s_i, fsm)
 
-    dynam[:self.n_v] += J.T @ gamma_i
+    dynam[:self.n_v] += J_col.T @ gamma_i
 
     h_i = dynam - s_dot_i
     return h_i
@@ -223,7 +220,9 @@ class TrajectoryOptimizationSolution:
       # where vars = hstack(x[i], u[i], ...)
       vars = np.hstack((x[i], u[i], x[i+1], u[i+1], 
                           lambda_c[i], lambda_c[i+1], 
-                          gamma[i], bar_lambda[i]))
+                          gamma[i], 
+                          bar_lambda[i],
+                          ))
       prog.AddConstraint(CollocationConstraintHelper, 
                           np.zeros(self.n_x,), 
                           np.zeros(self.n_x,), 
@@ -258,9 +257,23 @@ class TrajectoryOptimizationSolution:
   def AddImpulseConstraint(self, prog, xminus, xplus, lambda_c, fsm2):
     # TODO: Do Not Support Double Support Case Now
     ### q should be the same 
-    diffq = xminus[:self.n_q] - xplus[:self.n_q]
+
+    #diffq = xminus[:self.n_q] - xplus[:self.n_q]
     #prog.AddLinearEqualityConstraint(diffq, np.zeros((self.n_q,)))
-    prog.AddBoundingBoxConstraint(np.zeros((self.n_q,)), np.zeros((self.n_q,)), diffq)
+    #prog.AddBoundingBoxConstraint(np.zeros((self.n_q, 1), dtype=np.float32), 
+    #                              np.zeros((self.n_q, 1), dtype=np.float32), 
+    #                              diffq.reshape(-1, 1))
+
+    def qHelper(vars):
+        xminus = vars[:self.n_x]
+        xplus = vars[self.n_x: 2 * self.n_x]
+        return xminus[:self.n_q] - xplus[:self.n_q]
+
+    vars = np.hstack((xminus, xplus))
+    prog.AddConstraint(qHelper,
+                        np.zeros((self.n_q,)),
+                        np.zeros((self.n_q,)),
+                        vars)
 
     ### vp = vm + M^{-1}*J^T*Lambda
     def impulseHelper(vars):
@@ -326,13 +339,13 @@ class TrajectoryOptimizationSolution:
         if mode in [LEFT_STANCE, RIGHT_STANCE]:
           ## Reset Constraint
           xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, -1], fsm2=mode)
+          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m], fsm2=fsm2)
           #self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, -1], fsm2=fsm2)
           
         elif mode == DOUBLE_SUPPORT:
           ## Reset Constraint
           xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, N-1], fsm2=fsm2)
+          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m], fsm2=fsm2)
 
         elif mode == SPACE_STANCE:
           continue
@@ -351,8 +364,8 @@ class TrajectoryOptimizationSolution:
     x_flat = x[..., 0].reshape(-1, 1)
     A = np.eye(n_mode * repeat * N)
     b = -1 * np.ones((n_mode * repeat * N)) *  destination
-    print("Testing destination cost")
-    prog.AddL2NormCost(A, b, x_flat)
+    #print("Testing destination cost")
+    #prog.AddL2NormCost(A, b, x_flat)
 
   def AddInputSauration(self, prog, x, u, N, n_mode, repeat):
     # 6. Add bounding box constraints on the inputs and qdot 
@@ -370,7 +383,7 @@ class TrajectoryOptimizationSolution:
                                     np.concatenate([x, u], -1).reshape(-1, 1)
                                     )
 
-  def AddFrictonCone(self, prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c):
+  def AddFrictonCone(self, prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c, gamma):
     # Friction Constraints for 2D
     zero_lm = np.zeros((n_mode * N * repeat, 1))
     zero_bar = np.zeros((n_mode * (N-1) * repeat, 1))
@@ -378,18 +391,22 @@ class TrajectoryOptimizationSolution:
     # Add constraint that out of plane contact force is zero
     prog.AddLinearEqualityConstraint(lambda_c[..., 1].reshape(-1, 1), zero_lm)
     prog.AddLinearEqualityConstraint(bar_lambda_c[..., 1].reshape(-1, 1), zero_bar)
+    prog.AddLinearEqualityConstraint(gamma[..., 1].reshape(-1, 1), zero_bar)
 
     # Add Friction Cone Constraint assuming mu = 1
     print(f"mu = {mu}")
     
     lambda_c = lambda_c.reshape(-1, 3)
     bar_lambda_c = bar_lambda_c.reshape(-1, 3)
+    gamma = gamma.reshape(-1, 3)
     for i in range(len(lambda_c)):
         prog.AddLinearConstraint(lambda_c[i, 0] - mu * lambda_c[i, 2] <= 0)
         prog.AddLinearConstraint(-lambda_c[i, 0] - mu * lambda_c[i, 2] <= 0)
     for i in range(len(bar_lambda_c)):
         prog.AddLinearConstraint(bar_lambda_c[i, 0] - mu * bar_lambda_c[i, 2] <= 0)
         prog.AddLinearConstraint(-bar_lambda_c[i, 0] - mu * bar_lambda_c[i, 2] <= 0)
+        prog.AddLinearConstraint(gamma[i, 0] - mu * gamma[i, 2] <= 0)
+        prog.AddLinearConstraint(-gamma[i, 0] - mu * gamma[i, 2] <= 0)
 
 
   def solve(self, N, seqs, repeat, initial_states, tf, mu, destination, iters, test=False):
@@ -412,14 +429,18 @@ class TrajectoryOptimizationSolution:
     lambda_c  = np.zeros((n_mode * repeat, N, 3), dtype="object")
 
     ## Slack var
+    impluses = np.zeros((n_mode * repeat - 1, 3), dtype="object")
     gamma = np.zeros((n_mode * repeat, (N - 1), 3), dtype="object")
     bar_lambda_c = np.zeros((n_mode * repeat, (N - 1), 3), dtype="object")
+
 
     for m, mode in enumerate(seqs * repeat):
       for i in range(N):
         x[m, i] = prog.NewContinuousVariables(self.n_x, "x_{}_{}".format(m, i) )
         u[m, i] = prog.NewContinuousVariables(self.n_u, "u_{}_{}".format(m, i) )
         lambda_c[m, i] = prog.NewContinuousVariables(3, "lambdac_{}_{}".format(m, i) )
+      if len(seqs) > 1 and m < n_mode * repeat - 1:
+        impluses[m] = prog.NewContinuousVariables(3, "impulse_{}".format(m) )
         
     for m, mode in enumerate(seqs * repeat):
       for i in range((N-1)):
@@ -429,7 +450,13 @@ class TrajectoryOptimizationSolution:
     print("Whole x shape: ", x.shape)
 
     t0 = 0.0
-    timesteps = np.linspace(t0, tf, N * repeat * n_mode)
+    # When it reaches the end of the mode, the next mode starts right away
+    # ie, no time gap between the end of the mode and the start of the next mode
+
+    modetimesteps = np.linspace(t0, tf, n_mode * repeat + 1)
+    timesteps = [np.linspace(modetimesteps[i]+0.001, modetimesteps[i+1], N) for i in range(n_mode * repeat)]
+    timesteps = np.concatenate(timesteps)
+    print("Timesteps: ", timesteps)
 
 
     # 1.Add the kinematic constraints (initial state, final state)?
@@ -440,7 +467,7 @@ class TrajectoryOptimizationSolution:
     ub = angle * np.ones((n_mode * N * repeat, 1))
     prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, joint_pos_idx].reshape(-1, 1))
 
-    ## y position between 0.5 to 0.9
+    ### y position between 0.5 to 0.9
     lb = 0.6 * np.ones((n_mode * N * repeat, 1))
     ub = 0.9 * np.ones((n_mode * N * repeat, 1))
     prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, 1].reshape(-1, 1))
@@ -506,28 +533,28 @@ class TrajectoryOptimizationSolution:
         self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.zeros(2), ub=np.ones(2)*np.inf)
 
     # 4. Reset map and guard function
-    self.AddSwitchConstraints(prog, x, lambda_c, n_mode, N, seqs, repeat)
+    self.AddSwitchConstraints(prog, x, impluses, n_mode, N, seqs, repeat)
 
     # 5. Friction Cone
-    self.AddFrictonCone(prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c)
+    self.AddFrictonCone(prog, mu, N, n_mode, repeat, lambda_c, bar_lambda_c, gamma)
 
     # 6. Add input sauration
     self.AddInputSauration(prog, x, u, N, n_mode, repeat)
 
     # 7. Add the cost function here
-    if not test:
-      self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
+    #if not test:
+    self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
 
 
     # Intial guess
 
-    #prog.SetInitialGuess(x.flatten(), initial_states.flatten())
-    prog.SetInitialGuess(
-                         x.flatten(), 
-                         np.concatenate(
-                           [initial_states[0] for _ in range(n_mode * N * repeat)] 
-                         ).flatten()
-                         ) 
+    prog.SetInitialGuess(x.flatten(), initial_states.flatten())
+    #prog.SetInitialGuess(
+    #                     x.flatten(), 
+    #                     np.concatenate(
+    #                       [initial_states[0] for _ in range(n_mode * N * repeat)] 
+    #                     ).flatten()
+    #                     ) 
 
     prog.SetInitialGuess(u.flatten(), np.zeros((n_mode * N * repeat * self.n_u)))
 
@@ -549,7 +576,12 @@ class TrajectoryOptimizationSolution:
 
     lambda_sol = result.GetSolution(lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
     lambda_bar_sol = result.GetSolution(bar_lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
+    impluses_sol = result.GetSolution(impluses)
+    gamma_sol = result.GetSolution(gamma.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
 
+    ###################
+    ###### DEBUG ######
+    ###################
 
     print("Check whether the friction cone constraint holds?")
     for m, mode in enumerate(seqs * repeat):
@@ -566,11 +598,49 @@ class TrajectoryOptimizationSolution:
             print(f"lambda_bar_m{m}_{i}: {lambda_bar_i}")
 
 
+    print("Check contact point velocity and acceleration be 0")
+    for m, mode in enumerate(seqs * repeat):
+      for i in range(N):
+        J_c, J_c_dot_v = self.CalculateContactJacobian(x_sol[m, i], mode)
+        xdot = self.EvaluateDynamics(x_sol[m, i], u_sol[m, i], J_c, lambda_sol[m, i])
+        v = xdot[:self.n_q]
+        vdot = xdot[self.n_q:]
+        h_i = np.hstack((J_c @ v, J_c @ vdot + J_c_dot_v))
+        # h_i within 1e-6 considered as 0
+        if not(np.all(np.abs(h_i) < 1e-6)):
+          print("Contact point velocity and acceleration be 0 Not Hold")
+          print(f"h_m{m}_{i}: {h_i}")
+
+    print("Check collocation constraints")
+    for m, mode in enumerate(seqs * repeat):
+      for i in range(N - 1):
+        x_i = x_sol[m, i]
+        u_i = u_sol[m, i]
+        x_ip1 = x_sol[m, i+1]
+        u_ip1 = u_sol[m, i+1]
+        lambda_c_i = lambda_sol[m, i]
+        lambda_c_ip1 = lambda_sol[m, i+1]
+        gamma_i = gamma_sol[m, i]
+        bar_lambda = lambda_bar_sol[m, i]
+
+        h_i = self.CollocationConstraintEvaluator(timesteps[i+1] - timesteps[i], 
+                                                    x_i, u_i, x_ip1, u_ip1, 
+                                                    lambda_c_i, lambda_c_ip1, 
+                                                    bar_lambda, gamma_i,
+                                                    mode)
+        if not(np.all(np.abs(h_i) < 1e-6)):
+          print("Collocation constraints Not Hold")
+          print(f"h_m{m}_{i}: {h_i}")
+    ###################
+    ###### DEBUG ######
+    ###################
+
     print('optimal cost: ', result.get_optimal_cost())
     print('x_sol: ', x_sol)
     print('u_sol: ', u_sol)
     print('lambda_sol: ', lambda_sol)
     print('lambda_bar_sol: ', lambda_bar_sol)
+    print('impluses_sol: ', impluses_sol)
 
     print(result.get_solution_result())
 
@@ -592,4 +662,39 @@ class TrajectoryOptimizationSolution:
     u_traj = PiecewisePolynomial.ZeroOrderHold(timesteps, u_sol.T)
 
     return x_traj, u_traj, prog#, prog.GetInitialGuess(x), prog.GetInitialGuess(u)
+
+
+if __name__ == '__main__':
+  import importlib
+  import traj_optim
+  import fsm_utils
+
+  importlib.reload(traj_optim)
+  importlib.reload(fsm_utils)
+  from traj_optim import TrajectoryOptimizationSolution, read_csv
+  from fsm_utils import (
+      LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT
+  )
+
+  # Walking
+
+  # Blue is Right feet, Red is left
+
+  solver = TrajectoryOptimizationSolution()
+  N = 5
+  mode_seqs = [RIGHT_STANCE] #, LEFT_STANCE, RIGHT_STANCE]
+  repeat = 1
+  initial_states = read_csv("q&v.csv", N * repeat * len(mode_seqs))
+  tf = 0.2 # just now is tf = 2
+  destination = 0.3
+
+  x_traj, u_traj, prog = solver.solve(N, 
+                                      mode_seqs, 
+                                      repeat, 
+                                      initial_states,
+                                      mu=0.5, 
+                                      tf=tf, 
+                                      destination=destination, 
+                                      iters=2e4,
+                                      test=True)
   
