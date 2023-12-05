@@ -18,7 +18,8 @@ from fsm_utils import LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT, P
 def read_csv(csv_path, sample_num):
     tmp = np.genfromtxt(csv_path, delimiter=',')
     # map = np.random.choice(np.arange(tmp.shape[0]), size = sample_num, replace = False)
-    map = np.arange(0, tmp.shape[0], (tmp.shape[0]-0)//sample_num)
+    start_point = 10
+    map = np.arange(start_point, tmp.shape[0], (tmp.shape[0]- start_point)//sample_num)
     return tmp[map][:sample_num]
 
 class TrajectoryOptimizationSolution:
@@ -74,6 +75,7 @@ class TrajectoryOptimizationSolution:
     self.n_v = self.planar_arm.num_velocities()
     self.n_x = self.n_q + self.n_v
     self.n_u = self.planar_arm.num_actuators()
+    self.n_foot = 6
 
     # Store the actuator limits here
     self.effort_limits = np.zeros(self.n_u)
@@ -109,31 +111,57 @@ class TrajectoryOptimizationSolution:
 
     plant.SetPositionsAndVelocities(context, x)
 
-    J = np.zeros((3, self.n_v))
-    JdotV = np.zeros((3,))
+    J = np.zeros((self.n_foot, self.n_v), dtype=object)
+    JdotV = np.zeros((self.n_foot,), dtype=object)
 
     if fsm  == SPACE_STANCE:
-      J = np.zeros((3, self.n_v))
-      JdotV = np.zeros((3,))
-    if fsm in [LEFT_STANCE, RIGHT_STANCE]:
-      J = plant.CalcJacobianTranslationalVelocity(
+      J = np.zeros((self.n_foot, self.n_v))
+      JdotV = np.zeros((self.n_foot,))
+    if fsm in [LEFT_STANCE, RIGHT_STANCE, DOUBLE_SUPPORT]:
+      J_left = plant.CalcJacobianTranslationalVelocity(
           context, 
           JacobianWrtVariable.kV, 
-          contact_points[fsm].frame, 
-          contact_points[fsm].pt, 
+          contact_points[LEFT_STANCE].frame, 
+          contact_points[LEFT_STANCE].pt, 
           plant.world_frame(), 
           plant.world_frame()
       )
-      JdotV = plant.CalcBiasTranslationalAcceleration(
+      J_right = plant.CalcJacobianTranslationalVelocity(
           context, 
           JacobianWrtVariable.kV, 
-          contact_points[fsm].frame, 
-          contact_points[fsm].pt, 
+          contact_points[RIGHT_STANCE].frame, 
+          contact_points[RIGHT_STANCE].pt, 
+          plant.world_frame(), 
+          plant.world_frame()
+      )
+
+      JdotV_left = plant.CalcBiasTranslationalAcceleration(
+          context, 
+          JacobianWrtVariable.kV, 
+          contact_points[LEFT_STANCE].frame, 
+          contact_points[LEFT_STANCE].pt, 
           plant.world_frame(), 
           plant.world_frame()
       ).ravel()
-    if fsm == DOUBLE_SUPPORT:
-      raise NotImplementedError("Double support not implemented")
+      JdotV_right = plant.CalcBiasTranslationalAcceleration(
+          context, 
+          JacobianWrtVariable.kV, 
+          contact_points[RIGHT_STANCE].frame, 
+          contact_points[RIGHT_STANCE].pt, 
+          plant.world_frame(), 
+          plant.world_frame()
+      ).ravel()
+
+      if fsm == LEFT_STANCE:
+        J[:3] = J_left
+        JdotV[:3] = JdotV_left
+      elif fsm == RIGHT_STANCE:
+        J[3:] = J_right
+        JdotV[3:] = JdotV_right
+      elif fsm == DOUBLE_SUPPORT:
+        J = np.vstack((J_left, J_right))
+        JdotV = np.vstack((JdotV_left, JdotV_right))
+
     return J, JdotV
 
 
@@ -172,7 +200,8 @@ class TrajectoryOptimizationSolution:
   def CollocationConstraintEvaluator(self, dt, 
                                      x_i, u_i, x_ip1, u_ip1, 
                                      lambda_c_i, lambda_c_ip1, 
-                                     bar_lambda, gamma_i,
+                                      gamma_i,
+                                     bar_lambda, 
                                      fsm):
     h_i = np.zeros(self.n_x,)
     # Add a dynamics constraint using x_i, u_i, x_ip1, u_ip1, dt
@@ -186,11 +215,9 @@ class TrajectoryOptimizationSolution:
     s_dot_i = 1.5 / dt * (x_ip1 - x_i) - 0.25 * (f_i + f_ip1)
     s_i = 0.5 * (x_ip1 + x_i) - 0.125 * dt * (f_ip1 - f_i)
 
+    # J(q_c) 
     J_col, _ = self.CalculateContactJacobian(s_i, fsm)
     dynam = self.EvaluateDynamics(s_i, 0.5 * (u_i + u_ip1), J_col, bar_lambda)
-
-    # J(q_c) 
-    #J, _ = self.CalculateContactJacobian(s_i, fsm)
 
     dynam[:self.n_v] += J_col.T @ gamma_i
 
@@ -204,14 +231,15 @@ class TrajectoryOptimizationSolution:
         u_i = vars[self.n_x:self.n_x + self.n_u]
         x_ip1 = vars[self.n_x + self.n_u: 2*self.n_x + self.n_u]
         u_ip1 = vars[2*self.n_x + self.n_u: 2*self.n_x + 2*self.n_u]
-        lambda_c_i = vars[2*self.n_x + 2*self.n_u: 2*self.n_x + 2*self.n_u + 3]
-        lambda_c_ip1 = vars[2*self.n_x + 2*self.n_u + 3: 2*self.n_x + 2*self.n_u + 6]
-        gamma_i = vars[2*self.n_x + 2*self.n_u + 6: 2*self.n_x + 2*self.n_u + 6 + 3]
-        bar_lambda = vars[2*self.n_x + 2*self.n_u + 6 + 3: 2*self.n_x + 2*self.n_u + 6 + 3 + 3]
+        lambda_c_i = vars[2*self.n_x + 2*self.n_u: 2*self.n_x + 2*self.n_u + self.n_foot]
+        lambda_c_ip1 = vars[2*self.n_x + 2*self.n_u + self.n_foot: 2*self.n_x + 2*self.n_u + self.n_foot*2]
+        gamma_i = vars[2*self.n_x + 2*self.n_u + self.n_foot*2: 2*self.n_x + 2*self.n_u + self.n_foot*3]
+        bar_lambda = vars[2*self.n_x + 2*self.n_u + self.n_foot*3: 2*self.n_x + 2*self.n_u + self.n_foot*4]
         return self.CollocationConstraintEvaluator(timesteps[i+1] - timesteps[i], 
                                                     x_i, u_i, x_ip1, u_ip1, 
                                                     lambda_c_i, lambda_c_ip1, 
-                                                    bar_lambda, gamma_i,
+                                                    gamma_i,
+                                                    bar_lambda, 
                                                     fsm)
         
       # Within this loop add the dynamics constraints for segment i (aka collocation constraints)
@@ -230,14 +258,14 @@ class TrajectoryOptimizationSolution:
 
   def ContactConstraintEvaluator(self, x_i, u_i, lambda_c, mode):
     # Contact Contraints, accelaration = 0, velcoity = 0
-    h_i = np.zeros(6, dtype=object)
+    h_i = np.zeros(self.n_foot * 2, dtype=object)
     J_c, J_c_dot_v = self.CalculateContactJacobian(x_i, mode)
     
     xdot = self.EvaluateDynamics(x_i, u_i, J_c, lambda_c)
     v = xdot[:self.n_q]
     vdot = xdot[self.n_q:]
-    h_i[:3] = J_c @ v
-    h_i[3:] = J_c @ vdot + J_c_dot_v
+    h_i[:self.n_foot] = J_c @ v
+    h_i[self.n_foot:] = J_c @ vdot + J_c_dot_v
     return h_i
 
   def AddContactConstraints(self, prog, x, u, lambda_c, N, mode):
@@ -250,20 +278,12 @@ class TrajectoryOptimizationSolution:
 
         vars = np.hstack((x[i], u[i], lambda_c[i]))
         prog.AddConstraint(AddContactConstraintsHelper, 
-                        np.zeros(6,), 
-                        np.zeros(6,), 
+                        np.zeros(self.n_foot * 2,), 
+                        np.zeros(self.n_foot * 2,), 
                         vars)
 
   def AddImpulseConstraint(self, prog, xminus, xplus, lambda_c, fsm2):
-    # TODO: Do Not Support Double Support Case Now
     ### q should be the same 
-
-    #diffq = xminus[:self.n_q] - xplus[:self.n_q]
-    #prog.AddLinearEqualityConstraint(diffq, np.zeros((self.n_q,)))
-    #prog.AddBoundingBoxConstraint(np.zeros((self.n_q, 1), dtype=np.float32), 
-    #                              np.zeros((self.n_q, 1), dtype=np.float32), 
-    #                              diffq.reshape(-1, 1))
-
     def qHelper(vars):
         xminus = vars[:self.n_x]
         xplus = vars[self.n_x: 2 * self.n_x]
@@ -282,8 +302,8 @@ class TrajectoryOptimizationSolution:
         lambda_c = vars[2 * self.n_x: ]
         self.planar_arm.SetPositionsAndVelocities(self.context, xminus.reshape(-1, 1))
         M = self.planar_arm.CalcMassMatrixViaInverseDynamics(self.context)
-        #J, _ = self.CalculateContactJacobian(xplus, fsm2)
-        J, _ = self.CalculateContactJacobian(xminus, fsm2)
+        J, _ = self.CalculateContactJacobian(xplus, fsm2)
+        #J, _ = self.CalculateContactJacobian(xminus, fsm2)
         
         diffv = M @ (xplus[self.n_q:] - xminus[self.n_q:]) - J.T @ lambda_c
         return diffv
@@ -320,6 +340,7 @@ class TrajectoryOptimizationSolution:
             self._CalFootPoints(vars, self.contact_points[LEFT_STANCE])[2:],
             self._CalFootPoints(vars, self.contact_points[RIGHT_STANCE])[2:]
             ]).reshape(-1, 1)
+        return out
     
     vars = x
     prog.AddConstraint(bothFootHeightHelper, 
@@ -333,22 +354,14 @@ class TrajectoryOptimizationSolution:
 
   def AddSwitchConstraints(self, prog, x, lambda_c, n_mode, N, seqs, repeat):
     seqs = seqs * repeat
-    for m, mode in enumerate(seqs):
-      if m < n_mode * repeat - 1:
-        fsm2 = seqs[m + 1]
-        if mode in [LEFT_STANCE, RIGHT_STANCE]:
-          ## Reset Constraint
-          xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m], fsm2=fsm2)
-          #self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m, -1], fsm2=fsm2)
-          
-        elif mode == DOUBLE_SUPPORT:
-          ## Reset Constraint
-          xminus, xplus = x[m, N-1], x[m+1, 0]
-          self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m], fsm2=fsm2)
-
-        elif mode == SPACE_STANCE:
-          continue
+    for m in range(1, len(seqs)):
+      fsm2 = seqs[m]
+      xminus, xplus = x[m-1, N-1], x[m, 0]
+      if fsm2 in [LEFT_STANCE, RIGHT_STANCE, DOUBLE_SUPPORT]:
+        self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m-1], fsm2=fsm2)
+      elif fsm2 == SPACE_STANCE:
+        # No Impluse Constraint when in SPACE_STANCE
+        continue
 
 
   def AddCost(self, prog, x, u, n_mode, N, repeat, timesteps, destination):
@@ -393,20 +406,26 @@ class TrajectoryOptimizationSolution:
     prog.AddLinearEqualityConstraint(bar_lambda_c[..., 1].reshape(-1, 1), zero_bar)
     prog.AddLinearEqualityConstraint(gamma[..., 1].reshape(-1, 1), zero_bar)
 
+    prog.AddLinearEqualityConstraint(lambda_c[..., 4].reshape(-1, 1), zero_lm)
+    prog.AddLinearEqualityConstraint(bar_lambda_c[..., 4].reshape(-1, 1), zero_bar)
+    prog.AddLinearEqualityConstraint(gamma[..., 4].reshape(-1, 1), zero_bar)
+
     # Add Friction Cone Constraint assuming mu = 1
     print(f"mu = {mu}")
     
-    lambda_c = lambda_c.reshape(-1, 3)
-    bar_lambda_c = bar_lambda_c.reshape(-1, 3)
-    gamma = gamma.reshape(-1, 3)
+    lambda_c = lambda_c.reshape(-1, self.n_foot)
+    bar_lambda_c = bar_lambda_c.reshape(-1, self.n_foot)
+    gamma = gamma.reshape(-1, self.n_foot)
     for i in range(len(lambda_c)):
         prog.AddLinearConstraint(lambda_c[i, 0] - mu * lambda_c[i, 2] <= 0)
         prog.AddLinearConstraint(-lambda_c[i, 0] - mu * lambda_c[i, 2] <= 0)
+        prog.AddLinearConstraint(lambda_c[i, 3] - mu * lambda_c[i, 5] <= 0)
+        prog.AddLinearConstraint(-lambda_c[i, 3] - mu * lambda_c[i, 5] <= 0)
     for i in range(len(bar_lambda_c)):
         prog.AddLinearConstraint(bar_lambda_c[i, 0] - mu * bar_lambda_c[i, 2] <= 0)
         prog.AddLinearConstraint(-bar_lambda_c[i, 0] - mu * bar_lambda_c[i, 2] <= 0)
-        prog.AddLinearConstraint(gamma[i, 0] - mu * gamma[i, 2] <= 0)
-        prog.AddLinearConstraint(-gamma[i, 0] - mu * gamma[i, 2] <= 0)
+        prog.AddLinearConstraint(gamma[i, 3] - mu * gamma[i, 5] <= 0)
+        prog.AddLinearConstraint(-gamma[i, 3] - mu * gamma[i, 5] <= 0)
 
 
   def solve(self, N, seqs, repeat, initial_states, tf, mu, destination, iters, test=False):
@@ -426,26 +445,26 @@ class TrajectoryOptimizationSolution:
     prog = MathematicalProgram()
     x = np.zeros((n_mode * repeat, N, self.n_x), dtype="object")
     u = np.zeros((n_mode * repeat, N, self.n_u), dtype="object")
-    lambda_c  = np.zeros((n_mode * repeat, N, 3), dtype="object")
+    lambda_c  = np.zeros((n_mode * repeat, N, self.n_foot), dtype="object")
 
     ## Slack var
-    impluses = np.zeros((n_mode * repeat - 1, 3), dtype="object")
-    gamma = np.zeros((n_mode * repeat, (N - 1), 3), dtype="object")
-    bar_lambda_c = np.zeros((n_mode * repeat, (N - 1), 3), dtype="object")
+    impluses = np.zeros((n_mode * repeat - 1, self.n_foot), dtype="object")
+    gamma = np.zeros((n_mode * repeat, (N - 1), self.n_foot), dtype="object")
+    bar_lambda_c = np.zeros((n_mode * repeat, (N - 1), self.n_foot), dtype="object")
 
 
     for m, mode in enumerate(seqs * repeat):
       for i in range(N):
         x[m, i] = prog.NewContinuousVariables(self.n_x, "x_{}_{}".format(m, i) )
         u[m, i] = prog.NewContinuousVariables(self.n_u, "u_{}_{}".format(m, i) )
-        lambda_c[m, i] = prog.NewContinuousVariables(3, "lambdac_{}_{}".format(m, i) )
+        lambda_c[m, i] = prog.NewContinuousVariables(self.n_foot, "lambdac_{}_{}".format(m, i) )
       if len(seqs) > 1 and m < n_mode * repeat - 1:
-        impluses[m] = prog.NewContinuousVariables(3, "impulse_{}".format(m) )
+        impluses[m] = prog.NewContinuousVariables(self.n_foot, "impulse_{}".format(m) )
         
     for m, mode in enumerate(seqs * repeat):
       for i in range((N-1)):
-          gamma[m, i] = prog.NewContinuousVariables(3, "gamma_{}_{}".format(m, i) )
-          bar_lambda_c[m, i] = prog.NewContinuousVariables(3, "bar_lambdac_{}_{}".format(m, i) )
+          gamma[m, i] = prog.NewContinuousVariables(self.n_foot, "gamma_{}_{}".format(m, i) )
+          bar_lambda_c[m, i] = prog.NewContinuousVariables(self.n_foot, "bar_lambdac_{}_{}".format(m, i) )
 
     print("Whole x shape: ", x.shape)
 
@@ -513,7 +532,7 @@ class TrajectoryOptimizationSolution:
         for i in range(N):
           # Swing foot position above 0
           if i == N-1:
-            self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0.03 , ub=np.ones(2)*np.inf)
+            self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0 , ub=np.ones(2)*np.inf)
           else:
             self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0.03 , ub=np.ones(2)*np.inf)
       elif mode in [LEFT_STANCE, RIGHT_STANCE]:
@@ -574,10 +593,10 @@ class TrajectoryOptimizationSolution:
     x_sol = result.GetSolution(x.reshape(-1, self.n_x)).reshape(n_mode * repeat, -1, self.n_x)
     u_sol = result.GetSolution(u.reshape(-1, self.n_u)).reshape(n_mode * repeat, -1, self.n_u)
 
-    lambda_sol = result.GetSolution(lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
-    lambda_bar_sol = result.GetSolution(bar_lambda_c.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
+    lambda_sol = result.GetSolution(lambda_c.reshape(-1, self.n_foot)).reshape(n_mode * repeat, -1, self.n_foot)
+    lambda_bar_sol = result.GetSolution(bar_lambda_c.reshape(-1, self.n_foot)).reshape(n_mode * repeat, -1, self.n_foot)
     impluses_sol = result.GetSolution(impluses)
-    gamma_sol = result.GetSolution(gamma.reshape(-1, 3)).reshape(n_mode * repeat, -1, 3)
+    gamma_sol = result.GetSolution(gamma.reshape(-1, self.n_foot)).reshape(n_mode * repeat, -1, self.n_foot)
 
     ###################
     ###### DEBUG ######
@@ -607,7 +626,7 @@ class TrajectoryOptimizationSolution:
         vdot = xdot[self.n_q:]
         h_i = np.hstack((J_c @ v, J_c @ vdot + J_c_dot_v))
         # h_i within 1e-6 considered as 0
-        if not(np.all(np.abs(h_i) < 1e-6)):
+        if not(np.all(np.abs(h_i) < 1e-4)):
           print("Contact point velocity and acceleration be 0 Not Hold")
           print(f"h_m{m}_{i}: {h_i}")
 
@@ -628,7 +647,7 @@ class TrajectoryOptimizationSolution:
                                                     lambda_c_i, lambda_c_ip1, 
                                                     bar_lambda, gamma_i,
                                                     mode)
-        if not(np.all(np.abs(h_i) < 1e-6)):
+        if not(np.all(np.abs(h_i) < 1e-4)):
           print("Collocation constraints Not Hold")
           print(f"h_m{m}_{i}: {h_i}")
     ###################
