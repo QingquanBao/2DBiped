@@ -17,9 +17,8 @@ from fsm_utils import LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT, P
 
 def read_csv(csv_path, sample_num):
     tmp = np.genfromtxt(csv_path, delimiter=',')
-    # map = np.random.choice(np.arange(tmp.shape[0]), size = sample_num, replace = False)
     start_point = 0
-    map = np.arange(start_point, tmp.shape[0], (tmp.shape[0]- start_point)//sample_num)
+    map = np.arange(start_point, tmp.shape[0], (tmp.shape[0]-start_point)//sample_num)
     return tmp[map][:sample_num]
 
 class TrajectoryOptimizationSolution:
@@ -316,7 +315,7 @@ class TrajectoryOptimizationSolution:
         diffv = M @ (xplus[self.n_q:] - xminus[self.n_q:]) - J.T @ lambda_c
         return diffv
     
-    vars = np.hstack((xplus,xminus, lambda_c))
+    vars = np.hstack((xplus, xminus, lambda_c))
     prog.AddConstraint(impulseHelper, 
                           np.zeros((self.n_v,)), 
                           np.zeros((self.n_v,)), 
