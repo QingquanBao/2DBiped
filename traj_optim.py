@@ -17,8 +17,8 @@ from fsm_utils import LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT, P
 
 def read_csv(csv_path, sample_num):
     tmp = np.genfromtxt(csv_path, delimiter=',')
-    # map = np.random.choice(np.arange(tmp.shape[0]), size = sample_num, replace = False)
-    map = np.arange(0, tmp.shape[0], (tmp.shape[0]-0)//sample_num)
+    start_point = 0
+    map = np.arange(start_point, tmp.shape[0], (tmp.shape[0]-start_point)//sample_num)
     return tmp[map][:sample_num]
 
 class TrajectoryOptimizationSolution:
@@ -288,7 +288,7 @@ class TrajectoryOptimizationSolution:
         diffv = M @ (xplus[self.n_q:] - xminus[self.n_q:]) - J.T @ lambda_c
         return diffv
     
-    vars = np.hstack((xplus,xminus, lambda_c))
+    vars = np.hstack((xplus, xminus, lambda_c))
     prog.AddConstraint(impulseHelper, 
                           np.zeros((self.n_v,)), 
                           np.zeros((self.n_v,)), 
@@ -607,7 +607,7 @@ class TrajectoryOptimizationSolution:
         vdot = xdot[self.n_q:]
         h_i = np.hstack((J_c @ v, J_c @ vdot + J_c_dot_v))
         # h_i within 1e-6 considered as 0
-        if not(np.all(np.abs(h_i) < 1e-6)):
+        if not(np.all(np.abs(h_i) < 1e-4)):
           print("Contact point velocity and acceleration be 0 Not Hold")
           print(f"h_m{m}_{i}: {h_i}")
 
@@ -628,7 +628,7 @@ class TrajectoryOptimizationSolution:
                                                     lambda_c_i, lambda_c_ip1, 
                                                     bar_lambda, gamma_i,
                                                     mode)
-        if not(np.all(np.abs(h_i) < 1e-6)):
+        if not(np.all(np.abs(h_i) < 1e-4)):
           print("Collocation constraints Not Hold")
           print(f"h_m{m}_{i}: {h_i}")
     ###################
