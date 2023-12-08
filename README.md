@@ -1,13 +1,13 @@
 # How to train your human baby: 2D Biped w/ Constrained Hybrid Collocation
 
 - Running
-![[media/run.gif]]
+![](media/run.gif)
 - Jumping
-![[media/full_traj_jump.gif]]
-![[media/unit_traj_jump.gif]]
+![](media/full_traj_jump.gif)
+![](media/unit_traj_jump.gif)
 - Walking
-![[media/full_traj_walk.gif]]
-![[media/unit_traj_walk.gif]]
+![](media/full_traj_walk.gif)
+![](media/unit_traj_walk.gif)
 
 ## Overview
 This code implements a 2D biped that can walk, run, and jump (backflip is coming! or not). It uses constrained hybrid collocation for trajectory optimization. The code consists of cost functions, dynamics constraints, contact point constraints, guard functions, hybrid collocation, and a reset map.
