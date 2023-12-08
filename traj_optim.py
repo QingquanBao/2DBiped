@@ -13,7 +13,7 @@ import pydrake.math
 from pydrake.math import RigidTransform
 from pydrake.autodiffutils import AutoDiffXd
 
-from fsm_utils import LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT, PointOnFrame
+from fsm_utils import LEFT_STANCE, RIGHT_STANCE, SPACE_STANCE, DOUBLE_SUPPORT, FLIP, PointOnFrame
 
 def read_csv(csv_path, sample_num):
     tmp = np.genfromtxt(csv_path, delimiter=',')
@@ -80,7 +80,7 @@ class TrajectoryOptimizationSolution:
     self.effort_limits = np.zeros(self.n_u)
     for act_idx in range(self.n_u):
       self.effort_limits[act_idx] = \
-        self.planar_arm.get_joint_actuator(JointActuatorIndex(act_idx)).effort_limit()
+        self.planar_arm.get_joint_actuator(JointActuatorIndex(act_idx)).effort_limit() #* 100
     self.joint_limits = np.pi * np.ones(self.n_q)
     self.vel_limits = 15 * np.ones(self.n_v)
 
@@ -116,7 +116,7 @@ class TrajectoryOptimizationSolution:
       J.fill(AutoDiffXd(0.0))
       JdotV.fill(AutoDiffXd(0.0))
 
-    if fsm  == SPACE_STANCE:
+    if fsm in [SPACE_STANCE, FLIP]:
       pass
     if fsm in [LEFT_STANCE, RIGHT_STANCE, DOUBLE_SUPPORT]:
       J_left = plant.CalcJacobianTranslationalVelocity(
@@ -210,7 +210,6 @@ class TrajectoryOptimizationSolution:
                                      fsm):
     h_i = np.zeros(self.n_x,)
     # Add a dynamics constraint using x_i, u_i, x_ip1, u_ip1, dt
-    # You should make use of the EvaluateDynamics() function to compute f(x,u)
     J_i, _ = self.CalculateContactJacobian(x_i, fsm)
     J_ip1, _ = self.CalculateContactJacobian(x_ip1, fsm)
 
@@ -359,19 +358,20 @@ class TrajectoryOptimizationSolution:
   ###### Abstract Constraint ADD ###########
   ##########################################
 
-  def AddSwitchConstraints(self, prog, x, lambda_c, n_mode, N, seqs, repeat):
+  def AddSwitchConstraints(self, prog, x, impulses, n_mode, N, seqs, repeat):
     seqs = seqs * repeat
     for m in range(1, len(seqs)):
+      fsm1 = seqs[m-1]
       fsm2 = seqs[m]
       xminus, xplus = x[m-1, N-1], x[m, 0]
       self.AddMinusPlusInvariantConstraint(prog, xminus, xplus)
-      if fsm2 in [LEFT_STANCE, RIGHT_STANCE, DOUBLE_SUPPORT]:
-        self.AddImpulseConstraint(prog, xminus, xplus, lambda_c[m-1], fsm2=fsm2)
-      elif fsm2 == SPACE_STANCE:
+      if fsm2 in [LEFT_STANCE, RIGHT_STANCE, DOUBLE_SUPPORT] and fsm1 != fsm2:
+        self.AddImpulseConstraint(prog, xminus, xplus, impulses[m-1], fsm2=fsm2)
+      elif fsm2 in [SPACE_STANCE, FLIP]:
         # No Impluse Constraint when in SPACE_STANCE
         continue
 
-  def AddCost(self, prog, x, u, n_mode, N, repeat, timesteps, destination):
+  def AddCost(self, prog, x, u, n_mode, N, repeat, timesteps, destination, dest_cost=False):
     ## Minimal effort
     cost = 0
     u_flat = u.reshape(-1, 4)
@@ -381,11 +381,12 @@ class TrajectoryOptimizationSolution:
     prog.AddQuadraticCost(cost)
     
     ## Close to the destination
-    x_flat = x[..., 0].reshape(-1, 1)
-    A = np.eye(n_mode * repeat * N)
-    b = -1 * np.ones((n_mode * repeat * N)) *  destination
-    #print("Testing destination cost")
-    #prog.AddL2NormCost(A, b, x_flat)
+    if dest_cost:
+      x_flat = x[..., 0].reshape(-1, 1)
+      A = np.eye(n_mode * repeat * N)
+      b = -1 * np.ones((n_mode * repeat * N)) *  destination
+      print("Testing destination cost")
+      prog.AddL2NormCost(A, b, x_flat)
 
   def AddInputSauration(self, prog, x, u, N, n_mode, repeat):
     # 6. Add bounding box constraints on the inputs and qdot 
@@ -439,6 +440,8 @@ class TrajectoryOptimizationSolution:
       prog.AddLinearConstraint(gamma[i, 0] -  0.2 * mu * gamma[i, 2] <= 0)
       prog.AddLinearConstraint(-gamma[i, 0] -  0.2 * mu * gamma[i, 2] <= 0)
       if self.n_foot == 6:
+        prog.AddLinearConstraint(bar_lambda_c[i, 3] - mu * bar_lambda_c[i, 5] <= 0)
+        prog.AddLinearConstraint(-bar_lambda_c[i, 3] - mu * bar_lambda_c[i, 5] <= 0)
         prog.AddLinearConstraint(gamma[i, 3] -  0.2 * mu * gamma[i, 5] <= 0)
         prog.AddLinearConstraint(-gamma[i, 3] -  0.2 * mu * gamma[i, 5] <= 0)
 
@@ -466,7 +469,7 @@ class TrajectoryOptimizationSolution:
           if i < N-1:
             prog.AddLinearEqualityConstraint(gamma[m, i][:3], zero_lm)
             prog.AddLinearEqualityConstraint(lambda_c_bar[m, i][:3], zero_lm)
-      elif mode == SPACE_STANCE:
+      elif mode in [SPACE_STANCE, FLIP]:
         prog.AddLinearEqualityConstraint(lambda_c[m].reshape(-1, 1), zero_block.reshape(-1, 1))
         prog.AddLinearEqualityConstraint(gamma[m].reshape(-1, 1), zero_block_bar.reshape(-1, 1))
         prog.AddLinearEqualityConstraint(lambda_c_bar[m].reshape(-1, 1), zero_block_bar.reshape(-1, 1))
@@ -475,15 +478,43 @@ class TrajectoryOptimizationSolution:
           prog.AddLinearEqualityConstraint(impluses[m][3:], zero_lm)
         elif (seqs * repeat)[m+1] == RIGHT_STANCE:
           prog.AddLinearEqualityConstraint(impluses[m][:3], zero_lm)
-        elif (seqs * repeat)[m+1] == SPACE_STANCE:
+        elif (seqs * repeat)[m+1] in [SPACE_STANCE, FLIP]:
           prog.AddLinearEqualityConstraint(impluses[m], np.zeros((self.n_foot, 1)))
+
+  def AddBackflipConstraint(self, prog, x, seqs, N, n_mode, repeat, clockwise=True):
+    for m, fsm in enumerate(seqs * repeat):
+      if fsm == FLIP:
+        # 1. Let the feet height larger than the torso height in the middle of space stance
+        for i in range(N // 3, N // 3 * 2):
+          def bothFootHeightHelper(vars):
+            x = vars
+            lfoot_height, rfoot_height = self._CalBothFootHeight(x)
+            lfoot_height -= x[1]
+            rfoot_height -= x[1]
+            return np.vstack((lfoot_height, rfoot_height))
+
+          vars = x[m, i]
+          prog.AddConstraint(bothFootHeightHelper,
+                                np.array([0, 0]).reshape(-1, 1),
+                                np.array([np.inf, np.inf]).reshape(-1, 1), 
+                                vars)
+
+        # 2. Torso angle increase from 0 to 360 degrees
+        for i in range(N-1):
+          if not clockwise:
+            prog.AddLinearConstraint(x[m, i][2] <= x[m, i+1][2])
+          else:
+            prog.AddLinearConstraint(x[m, i][2] >= x[m, i+1][2])
+
+        # 3. Let the torso angle be 0 at the end of the backflip
+        prog.AddLinearConstraint(x[m, -1][2] == 0)
 
 
   #######################
   ###### Solve ##########
   #######################
 
-  def solve(self, N, seqs, repeat, initial_states, tf, mu, destination, iters, test=False):
+  def solve(self, N, seqs, repeat, initial_states, tf, mu, destination, iters, test=False, backflip=False, clockwise=True, final_hard_constraint=False, dest_cost=False, uguess=None):
     '''
     Parameters:
       N - number of knot points
@@ -534,15 +565,16 @@ class TrajectoryOptimizationSolution:
 
     # 1.Add the kinematic constraints (initial state, final state)?
     ## Torso angle almost upright, within -45 to 45 degrees
-    joint_pos_idx = self.plant.GetJointByName("planar_roty").position_start()
-    angle = np.pi / 4
-    lb = -angle * np.ones((n_mode * N * repeat, 1))
-    ub = angle * np.ones((n_mode * N * repeat, 1))
-    prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, joint_pos_idx].reshape(-1, 1))
+    if not backflip:
+      joint_pos_idx = self.plant.GetJointByName("planar_roty").position_start()
+      angle = np.pi / 3
+      lb = -angle * np.ones((n_mode * N * repeat, 1))
+      ub = angle * np.ones((n_mode * N * repeat, 1))
+      prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, joint_pos_idx].reshape(-1, 1))
 
-    ### y position between 0.5 to 0.9
-    lb = 0.6 * np.ones((n_mode * N * repeat, 1))
-    ub = 0.9 * np.ones((n_mode * N * repeat, 1))
+    ### y position >= 0.4
+    lb = 0.4 * np.ones((n_mode * N * repeat, 1))
+    ub = np.inf * np.ones((n_mode * N * repeat, 1))
     prog.AddBoundingBoxConstraint(lb.flatten(), ub.flatten(), x[:, :, 1].reshape(-1, 1))
 
 
@@ -567,15 +599,37 @@ class TrajectoryOptimizationSolution:
       prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial)
       prog.AddLinearEqualityConstraint(xf.reshape(-1, 1), final)
 
+      """
+    elif backflip:
+      print("Backflip Mode")
+      initial = np.array(
+              [0.00000000,0.80000000,0.00000000,
+              -0.64350111,1.28700222,-0.64350111,1.28700222,
+              0.00000000,0.00000000,0.00000000,0.00000000,
+              0.00000000,0.00000000,0.00000000])
+
+      final = np.array(
+              [0.00000000,0.80000000,0.00000000,
+              +0.64350111, -1.28700222, -0.64350111,1.28700222,
+              0.00000000,0.00000000,0.00000000,0.00000000,
+              0.00000000,0.00000000,0.00000000])
+
+      xf = x[-1,-1]
+      prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial)
+      #prog.AddLinearEqualityConstraint(xf.reshape(-1, 1), final)
+      """
     else:
       ## Add Constraints on destination, x = 2 m
       print(f'Destination: {destination}m')
       
       initial_state = initial_states[0].reshape(-1, 1)
-      final_state = initial_states[0].reshape(-1, 1).copy()
-      final_state[0] = destination
       prog.AddLinearEqualityConstraint(x0.reshape(-1, 1), initial_state)
-      prog.AddLinearEqualityConstraint(x[-1][-1].flatten(), final_state.flatten())
+      if final_hard_constraint:
+        final_state = initial_states[-1].reshape(-1, 1).copy()
+        #final_state[0] = destination
+        prog.AddLinearEqualityConstraint(x[-1][-1].flatten(), final_state.flatten())
+      else:
+        prog.AddLinearEqualityConstraint(x[-1][-1][0], destination)
 
     # 2. Add collocation dynamics constraints
     for m, fsm in enumerate(seqs * repeat):
@@ -586,14 +640,14 @@ class TrajectoryOptimizationSolution:
 
     # 3. Add contact point constraints, velocity and acceleration be 0
     for m, mode in enumerate(seqs * repeat):
-      if mode == SPACE_STANCE:
+      if mode in [SPACE_STANCE, FLIP]:
         # No Contact points for SPACE CONDITION
         for i in range(N):
           # Swing foot position above 0
           if i == 0 or i == N-1:
             self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0 , ub=np.ones(2)*np.inf)
           else:
-            self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0.03 , ub=np.ones(2)*np.inf)
+            self.AddBothFootHeightConstraint(prog, x=x[m, i], lb=np.ones(2) * 0.2 , ub=np.ones(2)*np.inf)
       elif mode in [LEFT_STANCE, RIGHT_STANCE]:
         # Velocity and acceleration be 0
         self.AddContactConstraints(prog, x[m], u[m], lambda_c[m], N, mode)
@@ -622,14 +676,20 @@ class TrajectoryOptimizationSolution:
     # 6. Add input sauration
     self.AddInputSauration(prog, x, u, N, n_mode, repeat)
 
+    if backflip:
+      self.AddBackflipConstraint(prog, x, seqs, N, n_mode, repeat, clockwise=clockwise)
+
     # 7. Add the cost function here
     #if not test:
-    self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination)
+    self.AddCost(prog, x, u, n_mode, N, repeat, timesteps, destination, dest_cost=dest_cost)
 
 
     # Intial guess
     prog.SetInitialGuess(x.flatten(), initial_states.flatten())
-    prog.SetInitialGuess(u.flatten(), np.zeros((n_mode * N * repeat * self.n_u)))
+    if uguess is not None:
+      prog.SetInitialGuess(u.flatten(), uguess.flatten())
+    else:
+      prog.SetInitialGuess(u.flatten(), np.zeros((n_mode * N * repeat * self.n_u)))
 
 
     # Set up solver
@@ -702,7 +762,7 @@ class TrajectoryOptimizationSolution:
                                                     gamma_i,
                                                     bar_lambda, 
                                                     mode)
-        if not(np.all(np.abs(h_i) < 1e-3)):
+        if not(np.all(np.abs(h_i) < 1e-2)):
           print("Collocation constraints Not Hold")
           print(f"h_m{m}_{i}: {h_i}")
     ###################
@@ -710,11 +770,11 @@ class TrajectoryOptimizationSolution:
     ###################
 
     print('optimal cost: ', result.get_optimal_cost())
-    print('x_sol: ', x_sol)
-    print('u_sol: ', u_sol)
-    print('lambda_sol: ', lambda_sol)
-    print('lambda_bar_sol: ', lambda_bar_sol)
-    print('impluses_sol: ', impluses_sol)
+    print('x_sol: ', repr(x_sol))
+    print('u_sol: ', repr(u_sol))
+    print('lambda_sol: ', repr(lambda_sol))
+    print('lambda_bar_sol: ', repr(lambda_bar_sol))
+    print('impluses_sol: ', repr(impluses_sol))
 
     print(result.get_solution_result())
 

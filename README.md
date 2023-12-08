@@ -1,7 +1,16 @@
-# 2D Biped README
+# How to train your human baby: 2D Biped w/ Constrained Hybrid Collocation
+
+- Running
+![[media/run.gif]]
+- Jumping
+![[media/full_traj_jump.gif]]
+![[media/unit_traj_jump.gif]]
+- Walking
+![[media/full_traj_walk.gif]]
+![[media/unit_traj_walk.gif]]
 
 ## Overview
-This code implements a 2D biped that can walk, run, jump, and backflip. It uses hybrid constrained collocation for trajectory optimization. The code consists of cost functions, dynamics constraints, contact point constraints, guard functions, hybrid collocation, and a reset map.
+This code implements a 2D biped that can walk, run, and jump (backflip is coming! or not). It uses constrained hybrid collocation for trajectory optimization. The code consists of cost functions, dynamics constraints, contact point constraints, guard functions, hybrid collocation, and a reset map.
 
 ## Details
 ### Cost
@@ -55,3 +64,5 @@ $$
 x^-_k  = x^+_k
 $$
 
+## Reference
+> Posa, Michael, Cecilia Cantu and Russ Tedrake. “A direct method for trajectory optimization of rigid bodies through contact.” The International Journal of Robotics Research 33 (2014): 69 - 81.
