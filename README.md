@@ -1,18 +1,34 @@
 # How to train your human baby: 2D Biped w/ Constrained Hybrid Collocation
+## Modular Gait Optimization: From Unit Moves to Full Trajectory in Bipedal Systems
 
 - Running
-![](media/run.gif)
+Full trajecotry optimization with our Gait Modularization Optimization Technique (GMOT)
+![media/run.gif](media/run.gif)
 - Jumping
-![](media/full_traj_jump.gif)
-![](media/unit_traj_jump.gif)
+Full trajecotry optimization with GMOT
+![media/full_traj_jump.gif](media/full_traj_jump.gif)
+Gait unit trajectory
+![media/unit_traj_jump.gif](media/unit_traj_jump.gif)
 - Walking
-![](media/full_traj_walk.gif)
-![](media/unit_traj_walk.gif)
+Full trajecotry optimization with GMOT
+![media/full_traj_walk.gif](media/full_traj_walk.gif)
+Gait unit trajectory
+![media/unit_traj_walk.gif](media/unit_traj_walk.gif)
 
 ## Overview
-This code implements a 2D biped that can walk, run, and jump (backflip is coming! or not). It uses constrained hybrid collocation for trajectory optimization. The code consists of cost functions, dynamics constraints, contact point constraints, guard functions, hybrid collocation, and a reset map.
+This project addresses the computational challenges in hybrid direct collocation (HDC) for multi-step bipedal systems trajectory optimization. We introduce the Gait Modularization and Optimization Technique (GMOT), which utilizes unit gait trajectories as initialization for multi-step trajectory optimization, leading to significant improvements in efficacy and efficiency over naive HDC methods. We evaluated our results against three gaits: bunny hopping, walking, and running. 
 
-## Details
+## Running Environments
+If you are in Apple Sillicon, `venv` is recommended for PyDrake environment. 
+```bash
+python -m venv drake_env
+source drake_env/bin/activate
+pip install drake
+```
+
+or you could refer to [docker image](https://drake.mit.edu/docker.html) of PyDrake.
+
+## Math Details
 ### Cost
 The cost function aims to minimize the sum of the squared control inputs (u) and the squared difference between the current state (x) and the desired state (p).
 

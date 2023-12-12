@@ -715,7 +715,7 @@ class TrajectoryOptimizationSolution:
     ###################
     ###### DEBUG ######
     ###################
-
+    """
     print("Check whether the friction cone constraint holds?")
     for m, mode in enumerate(seqs * repeat):
       for i in range(N):
@@ -768,6 +768,7 @@ class TrajectoryOptimizationSolution:
     ###################
     ###### DEBUG ######
     ###################
+    """
 
     print('optimal cost: ', result.get_optimal_cost())
     print('x_sol: ', repr(x_sol))
